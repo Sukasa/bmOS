@@ -30,6 +30,7 @@ local logoFile = fs.open("/bmos/logo")
 local S
 
 repeat
+  S = logoFile.readLine()
   print(S)
 until S == nil
 
