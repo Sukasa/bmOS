@@ -1,0 +1,213 @@
+bmOS (Block Mesa OS)
+
+Features:
+	* "Proper" kernel
+	* Auto-update software from central server at startup
+	* Autorun file
+	* DNS Resolution across entire complex
+	* Network message routing
+	* Network file support
+	
+Use coroutine injection code (http://pastebin.com/2SQAzrWi) to take top-level coroutine.  Use that to start a bootloader that:
+	1) Displays logo and startup log
+	2) Loads and initializes the kernel
+	3) Modifies getmetatable() and getfenv() to implement basic security
+	4) Loads/Modifies APIs as necessary (this includes os.* patching)
+	5) Starts Service Manager
+	6) Starts Updater
+	7) Hands control of system to kernel
+	
+The updater:
+	1) Retrieves updated programs from main server as necessary
+	2) Installs any updates, and restarts the computer if any were installed
+	3) Starts login process
+	
+The login process:
+	1) Gets user login information and validates with user client
+	2) Starts shell as supplied user
+	
+The service manager is designed to control 'services', allowing them to be started and stopped.  When run, it:
+	1) Loads service config from srvcs.conf file
+	2) Starts appropriate services, taking into account dependencies and delay configuration
+	3) Maintains a list of which processes correspond to which services
+	4) Provides methods of starting and stopping service processes, including sanity checks for "this-depends-on-that"
+	5) Provides a method for other processes to query the availability of services
+	
+The kernel, upon loading, simply sets up some tables.  It has the responsibility for distributing system events to all processes, as well as facilitating inter-process communications.  During run, it:
+	1) Loops through each process, resuming it and checking the return value.
+		* For errors or ended processes, appropriately configures the process info, or removes the process from memory entirely if there are no handles to it.
+		* For Process-Info requests, updates the process table with information about a process (IPC support, etc)
+		* For Async IPC requests, lodges the request in a temporary store and resumes the process - unless the target is filtering, in which case the request fails.
+		* For Synchronous IPC requests, immediately either fails the request (if the answering process cannot support this) or resumes the target process with IPC data, and returns the yielded data back to the original process and resumes that
+		* For Filter information, stored into an event filter
+	2) Distributes Async IPC info to processes unless that process is filtering.  Return information is discarded, unless it is an error.
+
+	
+	
+APIs that will need to be changed and/or created:
+
+	* fs
+		* Where applicable, modify all functions to support files on other computers (blocking) - will require network file service
+		+ User-based permissions?
+		* fs APIs should user kernel.getAuthUser()
+	
+	- io
+	
+	+ user
+		-Admin Functions
+			setUserSource(hostname) -> hostname of user source, either remote system or local
+			create(newUsername, newPassword, fullName) -> will fail if this computer is not the user source
+		-User Functions
+			login(username, password) -> returns token, logout(user)
+			changePassword(user, oldPassword, newPassword)
+			isValidUserToken(username, token)
+			isUserAdmin(user) -> Returns (is admin && is valid)
+	
+	+ system
+		-System functions
+			requestReboot(), requestShutdown()
+			
+		-User Functions
+			log(), logError()
+		
+	+ kernel
+	  Global kernel functions
+	    -Admin Functions
+			killProcess(processId)
+			getProcessInfo(processId) -> UNLESS process is child (or nested child) of requesting process, in which case act as user function
+			broadcastRawEvent(eventData)
+			sendRawEvent(processId, eventData)
+			assumeProcessId(processId)-> Makes process-specific functions return/set data for other process
+			registerApi(apiName, sourceTable)
+			loadApiFile(sourceFile), getSystemLogWindow()
+			
+		-User Functions
+			replyIPC(ipcData), requestIPC(processId, ipcData), requestIPCAsync(processId, ipcData)
+			resolveIPCHost(protocol)
+			createProcess(filename, envVars, user)
+			startTimer(timeout), setAlarm(time)
+			version(), versionString()
+			
+	  Functions specific to the calling process
+		-User Functions
+			getProcessId(), getPATH()
+			pullEvent(filterString), pullEventRaw(filterString)
+			sleep(sleepTime, allowWake = false)
+			getWd(), setWd(), getPATH(), setPATH()
+			getUser(), setAuthUser(), getAuthUser()
+			getFile()
+			registerIPCHost(protocol), unregisterIPCHost(protocol)
+	
+	+ base64
+		- User Functions
+			+ toBase64()
+			+ toString()
+	
+	* os
+		-Admin Functions
+		* shutdown() -> Redirect to system.requestShutdown()
+		* reboot() -> Redirect to system.requestReboot()
+		
+		-User Functions
+		* version() -> Return kernel.versionString()
+		= getComputerID()
+		= getComputerLabel()
+		= run()
+		* pullEvent() -> Redirect to kernel.pullEvent()
+		* pullEventRaw() -> Redirect to kernel.pullEventRaw()
+		* queueEvent() -> Redirect to kernel.sendRawEvent(kernel.getProcessId(), ...)
+		= clock()
+		* startTimer() -> Redirect to kernel.startTimer(...)
+		= time()
+		= sleep()
+		= day()
+		* setAlarm() -> Redirect to kernel.setAlarm(...)
+		
+		- setComputerLabel()
+		
+	* shell
+		- User Functions
+			= exit()
+			* dir() -> Redirect to kernel.getWd()
+			* setDir() -> Redirect to kernel.setWd(), return old Wd
+			* path() -> Redirect to kernel.getPATH()
+			* setPath() -> Redirect to kernel.setPATH(), return old PATH
+			* resolve() -> Use working directory
+			* resolveProgram() -> Redirect to resolvePATH
+			+ resolvePath() -> like resolve(), but use PATH
+			* programs() -> Make this use kernel.getWd() and kernel.getPath()
+			* getRunningProgram() -> return kernel.getFile()
+			* run() -> kernel.createProcess() and then wait for that process to end
+		
+		- aliases()
+		- setAlias()
+		- clearAlias()
+		- shell.openTab()
+		- shell.switchTab()
+	
+	- multishell
+		
+	+ services
+	  -Service Manager functions
+		-Admin Functions
+			stopService(serviceName), startService(serviceName)
+			getServiceConfig(serviceName), setServiceConfig(serviceName)
+			getServiceInfo(serviceName), getServices()
+	
+	- rednet
+	
+	+ network
+		getModems()
+		openPort(portNum, modem) -> Defaults to first modem.  portHandle unique to modem/port combo.
+		closePort(portHandle)
+		sendPacket(portHandle, destHost, destPort, messageData)
+		readPacket(portHandle)
+		rxQueueLen(portHandle)
+
+Process Info includes the following:
+	* Process Id
+	* PATH
+	* Working directory
+	* Process filename
+	* IPC registration
+	* Event queue
+	* Handle count
+	* Return value or error
+	* Process status (Running, Ended)
+	* User
+	* Authenticated user (falls back to User)
+		
+Environments include the following
+	* APIs
+	* Passed-in information
+	* Process's terminal instance
+
+User Data Struct
+	* Username / userName
+	* Real Name / realName
+	* Auth Token / authToken
+	* Security Token / securityToken
+	
+Events
+	* network_packet portHandle
+	* ipc_request requestData requestId
+	* ipc_reply replyData requestId
+	* krnl_call (for kernel.* APIs)
+	* krnl_rply (for kernel.* APIs)
+	* stop
+	
+Services
+	User Core (Relies on Network Service) (only on user core computer)
+		Responsible for storing users, managing users, producing user tokens, and authenticating user tokens.
+	User Client (Relies on Network Service for normal users, but can service local root)
+	Network File Service (relies on Network Service and User Client)
+	Network Service (Registers Network API)
+	Network Routing Service (only on routers)
+	
+	
+KNOWN ISSUES
+* Metatable security not done
+* createProcess() doesn't use "safe" (permissions-check) load-file.
+* Can load APIs from /rom/ - prevent this?
+* APIs not done
+* No shell
