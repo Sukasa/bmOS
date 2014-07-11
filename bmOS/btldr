@@ -1,0 +1,88 @@
+--[[
+  bmOS - Bootloader
+
+  Initializes the kernel, loads base APIs, and intitiates service and update processes.
+  
+      .-'\
+   .-'  `/\
+.-'      `/\
+\         `/\ 
+ \         `/\                CraftOS
+  \    _-   `/\       _.--.
+   \    _-   `/`-..--\     )
+    \    _-   `,','  /    ,')
+     `-_   -   ` -- ~   ,','
+      `-              ,','
+       \,--.    ____==-~
+        \   \_-~\
+         `_-~_.-'
+ _ Seal _ \-~
+]]
+
+
+-- Clear screen
+term.setBackgroundColor(colors.black)
+term.clear()
+
+-- Display logo
+term.setCursorPos(1, 1)
+local logoFile = fs.open("/bmos/logo")
+local S
+
+repeat
+  print(S)
+until S == nil
+
+logoFile.close()
+logoFile = nil
+
+-- Create log window
+local w, h = term.getSize()
+local logWindow = window.create(term.current(), 1, h - 5, w, 6)
+
+-- Load kernel
+local kernel = nil
+
+do
+
+  local kernelEnvironment = {}
+  setmetatable( kernelEnvironment, {__index = _G} )
+  
+  local loadKernel, err = loadfile( "/bmos/krnl" )
+
+    if loadKernel then
+      kernel = loadKernel
+    else
+      print("Failed to load kernel!")
+      print("----------------------")
+      printError(err)
+      
+      os.sleep(10)
+      os.reboot()
+      
+    end
+  
+end
+
+kernel.beginInit(logWindow)
+
+-- Load APIs
+for _, fileName in ipairs(fs.list("/bmos/apis")) do
+  if not fs.isDir(fileName) then
+    -- Load API file
+    kernel.loadApi(fileName)
+  end
+end
+
+
+-- Start service manager
+kernel.createProcess("/bmos/svcmgr")
+
+-- Start updater
+kernel.createProcess("/bmos/updtr")
+
+-- Finish Initialization
+kernel.endInit()
+
+-- Hand off control to kernel
+kernel.run()

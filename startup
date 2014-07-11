@@ -1,0 +1,170 @@
+--[[
+	Author: NeverCast
+	Last Edited: 22/07/13
+	Published: 2/11/12
+	You're welcome to use this code however you like, but please leave my credit at the top. Thanks
+--]]
+
+--[[
+	Changes:
+	
+	1.Replacing the for-loop with a while-loop to not limit the iterations required in finding the parent shell
+	2.Removing Rednet and reloading it to fix the already running issue.
+	3.Now clears the myEnv global variable once injection is complete.
+
+	Thanks KaoS and TheOriginalBit for code fixes and bug reports.
+--]]
+
+-- Prior code writing hypothosis:
+-- How to become top level,
+
+-- Climb stack, Find single shell instance
+-- Kill shell instance, override pullEvent
+-- Override os.shutdown
+-- Exit code
+-- Wait for Bios to quit and hook that to fire up your own functions
+
+-- Add the functions here that you want to run once the environment has been overridden
+-- In this bios this was shell and rednet.run, I've removed rednet.run as an example
+-- Any functions here will be top level and recieve all the events!
+local loadPool = {
+		function()
+			os.run( {}, "/bmos/btldr" )
+		end
+}
+
+-- Feel free to set this to false if you don't want the text printed
+local showMessages = false
+
+
+if os.myEnv then
+	if showMessages then
+		print"Injection completed successfully"
+	end
+	-- Remove myEnv to prevent detection
+	os.myEnv = nil
+	return
+end
+
+local prevState = {}
+
+table.size = function(tbl)
+	local count = 0
+	for _,__ in pairs(tbl) do
+		count = count + 1
+	end
+	return count
+end
+
+local function getParentShell()
+  local at=0
+  while true do
+    at=at+1
+    local ok,env = pcall(function() return getfenv(at) end)
+    if not ok then break end
+    if table.size(env) == 1 then
+          local i,v = next(env) -- Grab first
+          if i == "shell" then
+            return v
+          end
+    end   
+  end
+  return nil
+end
+
+local function recover()
+	-- Set flag
+	os.myEnv = true
+	-- Put back the trampled environment
+	os.startTimer = prevState.startTimer
+	os.shutdown = prevState.shutdown
+	os.pullEvent = prevState.pullEvent
+	-- Launch shell like nothing happened
+	
+	prevState = nil
+	
+	term.setCursorPos(1,1)
+	term.clear()
+	
+	if showMessages then
+		-- Feel free to remove this line, It's just a proof thing
+		print"Look at me, I load before shell does"
+	end
+	
+	-- Because we killed rednet, we have to remove it and then reload it
+	_G['rednet'] = nil
+	os.loadAPI('/rom/apis/rednet')
+	
+	local ok, err = pcall( function()
+	parallel.waitForAny(
+		unpack(loadPool)
+	)
+	end )
+end
+
+os.stage = {}
+
+-- Stages:
+-- injected: Overriding os functions
+-- shutdown: Shutdown program has been called
+-- jstincse: Shell is doing it's just-in-case
+-- bioswait: Bios is waiting for a key press
+-- biosexit: Bios has quit
+-- complete: fully injected
+
+
+local function setStage(stage)
+	os.stage.currentStage = stage
+end
+
+local function getStage()
+	return os.stage.currentStage
+end
+
+local function _os_pullEvent(_filter)
+	_filter = _filter or ""
+	if _filter == "key" then
+		setStage("bioswait")
+		return "key", 0
+	elseif _filter == "timer" then
+		setStage("shutdown")
+		return "timer", 0
+	end
+end
+
+local function _replSleep(dur)
+    local timer = prevState.startTimer( dur )
+	repeat
+		local sEvent, param = prevState.pullEvent( "timer" )
+	until param == timer
+end
+
+local function _os_shutdown()
+	if getStage() == "shutdown" then
+		setStage("jstincse")
+	elseif getStage() == "bioswait" then
+		setStage("biosexit")
+	end
+	if getStage() == "biosexit" then
+		recover()
+	end
+end
+
+local function _os_startTimer(seconds)
+	return 0
+end
+
+local function inject()
+	prevState.startTimer = os.startTimer
+	prevState.shutdown = os.shutdown
+	prevState.pullEvent = os.pullEvent
+	os.shutdown = _os_shutdown
+	os.pullEvent = _os_pullEvent
+	os.startTimer = _os_startTimer
+	setStage("injected")
+	local shellImpl = getParentShell()
+	shellImpl.exit()
+end
+
+-- Start everything
+inject()

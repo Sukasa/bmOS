@@ -1,0 +1,481 @@
+--[[
+  bmOS - Main Kernel
+
+  Manages processes and APIs
+]]
+
+local kernel = {
+
+
+-- #####################################
+-- #          KERNEL VARIABLES         #
+-- #####################################
+
+  logWindow = nil
+  local rootUser = nil  
+  local userApis = {
+    math = math, bit = bit, colors = colors, keys = keys,
+    paintutils = paintutils, peripheral = peripheral,
+    redstone = redstone, string = string, table = table,
+    term = term, textutils = textutils, turtle = turtle,
+    vector = vector, window = window, http = http,
+    help = help, gps = gps, disk = disk
+  }
+  local adminApis = {
+    math = math, bit = bit, colors = colors, keys = keys,
+    paintutils = paintutils, peripheral = peripheral,
+    redstone = redstone, string = string, table = table,
+    term = term, textutils = textutils, turtle = turtle,
+    vector = vector, window = window, http = http,
+    help = help, gps = gps, disk = disk, coroutine = coroutine
+  }
+  local protectedApis = { nativefs = fs, nativeos = os, nativeshell = shell }
+  local baseUserEnv = {}
+  local baseAdminEnv = {}
+  
+  local processes = {}
+  local currentProcess = nil
+  local pidCounter = 0
+  
+  local basePATH = "/bmos/"
+  
+-- #####################################
+-- #       KERNEL INITIALIZATION       #
+-- #####################################
+
+  function beginInit(useLogWindow)
+    logWindow = useLogWindow
+    rootUser = createRootUser()
+    
+    -- Initialize API Tables with kernel functions
+    addUserApi("kernel", userApi)
+    addAdminApi("kernel", adminApi)
+    addApiToEnv(baseUserEnv, "kernel", userApi)
+    addApiToEnv(baseAdminEnv, "kernel", adminApi)
+    
+    currentProcess = {
+      processId = -1
+      filePath = "/bmos/btldr"
+      processTerminal = logWindow
+      user = rootUser
+      PATH = "/bmos/"
+      workingDirectory = "/bmos/"
+      returnedValue = 0
+      numHandles = 0
+      processStatus = "running"
+      authUser = nil
+      ipcInfo = nil
+      environment = _G
+      environmentMeta = nil
+    }
+    
+    
+  end
+  
+  function endInit()
+    currentProcess = nil
+  end
+
+  function run()
+    -- Run the kernel.  This is called after endInit() and is the point at which the kernel fully takes over from the bootloader
+  end
+  
+  
+-- #####################################
+-- #         PROCESS MANAGEMENT        #
+-- #####################################
+  
+  function createProcess(processFilename, environmentBase, ...)
+    local processFunction, err = loadfile(processFilename)
+    
+    if not processFunction then
+      if err and err ~= "" then
+        printError(err)
+      end
+      return false
+    end
+  
+    if environmentBase == nil or type(environmentBase) ~= "table" then
+      environmentBase = {}
+    end
+    
+    if #arg then
+      environmentBase.arguments = arg
+    end
+    
+    local processUser = environmentBase.asUser or getAuthUser()
+    if environmentBase.noUser or type(processUser) ~= "table" then
+      processUser = nil
+    end
+    
+    local processMetaEnvironment
+    
+    if environmentBase.unattached then
+      -- Create fresh environment based on user level
+      if isAdmin() then
+        processMetaEnvironment = {
+          __index = baseAdminEnv
+        }
+      else
+        processMetaEnvironment = {
+          __index = baseUserEnv
+        }
+      end
+    else
+      local parentEnvironment = getProcessEnvironment()
+      processMetaEnvironment = {
+        __index = parentEnvironment
+      }
+    end
+    
+    pidCounter = pidCounter + 1
+    
+    local processEntry = {
+      processId = pidCounter
+      processCoroutine = coroutine.create(processFunction)
+      processStatus = "running"
+      processArguments = environmentBase.arguments
+      
+      workingDirectory = environmentBase.workingDirectory or fs.getDir(processFilename)
+      PATH = environmentBase.PATH or basePath
+      
+      user = processUser
+      authUser = nil
+      
+      filePath = processFilename
+      
+      environment = environmentBase
+      environmentMeta = processMetaEnvironment
+      
+      returnedValue = nil
+      numHandlesTo = 0
+      openHandles = {}
+      
+      ipcInfo = {
+        ipcHost = false
+        registeredHostnames = {}
+      }
+      
+      eventQueue = { processArguments }
+    }
+    
+    setmetatable(environmentBase, processMetaEnvironment)
+    setfenv(processFunction, environmentBase)
+    
+    addProtectedMetatable(processMetaEnvironment)
+    
+    processes[#processes + 1] = processEntry
+    
+    return true
+  end
+  
+  function killProcess(targetProcessId)
+    -- Mark a process as dead, but leave it in the process pool.
+    process = getProcessEntry(targetProcessId)
+    if process then
+      process.processStatus = "killed"
+    end
+  end
+  
+  function reapProcesses()
+    -- Search through processes for ones that are 'dead', and remove them if they have no handles opened to them.  Be sure to close any handles the process had open!
+    for i = #processes, 1, -1 do
+      local process = processes[i]
+      if process.processStatus ~= "running" then
+        
+        -- Close all handles
+        for _,handle in pairs(process.openHandles) do
+          h = getProcessEntry(handle)
+          h.numHandlesTo = h.numHandlesTo - 1
+        end
+        
+        process.openHandles = {}
+        
+        -- If no handles, remove process entry
+        if process.numHandlesTo == 0 then
+          table.remove(processes, i)
+        end
+      end
+    end
+  end  
+  
+  function getProcessEntry(targetProcessId)
+    for k,v in pairs(processes) do
+      if v.processId == targetProcessId then
+        return v
+      end
+    end
+  
+  end
+  
+-- #####################################
+-- #         SECURITY FUNCTIONS        #
+-- #####################################
+  
+  function addProtectedMetatable(metatable)
+  
+  end
+  
+  function unprotectMetatable(tableHandle)
+  
+  end
+  
+  
+-- #####################################
+-- #           API MANAGEMENT          #
+-- #####################################
+  
+  function addAPIEnvironment(targetEnv, sourceEnv)
+    for k,v in pairs(sourceEnv) do
+      if type(v) == "table" then
+        addApiToEnv(targetEnv, k, v)
+      end
+    end
+  end
+  
+  function addApiToEnv(targetEnv, apiName, apiTable)
+    if (apiTable == nil) then return end
+    
+    if targetEnv[apiName] == nil then
+      targetEnv[apiName] = {}
+    end
+  
+    for k,v in pairs(apiTable) do
+      addFunctionToEnv(targetEnv, apiName, v, k)
+    end
+  end
+  
+  function addFunctionToEnv(targetEnv, apiName, apiFunction, functionName)
+    targetEnv[apiName][functionName] = apiFunction
+  end
+  
+  function addUserApi(apiName, apiTable)
+    if (apiTable != nil) then
+      userApis[apiName] = apiTable
+    end
+  end
+  
+  function addAdminApi(apiName, apiTable)
+    if (apiTable != nil) then
+      adminApis[apiName] = apiTable
+    end
+  end
+  
+  function createApiEnvironment()
+    -- Create environment    
+    local apiEnvironment = {}
+    
+    -- Load user APIs
+    addAPIEnvironment(apiEnvironment, userApis)
+    
+    if (user.isUserAdmin(getAuthenticatedUserForCurrentProcess())) then
+      addAPIEnvironment(apiEnvironment, adminApis)
+    end
+    
+    setmetatable(apiEnvironment, {__index = _G})
+    return apiEnvironment
+  end
+  
+  function loadApi(apiPath)                                
+    local apiEnvironment = createApiEnvironment()
+    local apiName = fs.getName(apiPath)
+    local apiData, err = loadfile(apiPath)
+    
+    if apiData then
+      setfenv(apiData, apiEnvironment)
+      apiData()
+    else
+      printError(err)
+      return false
+    end
+    
+    if apiEnvironment.userApi then
+      addUserApi(apiName, apiEnvironment.userApi)
+      addApiToEnv(baseUserEnv, apiName, apiEnvironment.userApi)
+    end
+    
+    if apiEnvironment.adminApi then
+      addUserApi(apiName, apiEnvironment.adminApi)
+      addApiToEnv(baseAdminEnv, apiName, apiEnvironment.adminApi)
+    end
+    
+    return true
+  end
+
+-- #####################################
+-- #           USER FUNCTIONS          #
+-- #####################################
+  
+  function createRootUser()
+    local seedFile = fs.open("/bmos/.krnlconf", "r")
+    local fileKey = tonumber(seedFile.readLine())
+    
+    math.randomseed(bit.bxor(os.getComputerID(), fileKey))
+    
+    seedFile.close()
+    seedFile = nil
+    fileKey = nil
+    
+    local keySource = math.random(2147483647)
+    
+    local b16 = "0123456789abcdef"
+    
+    keyToken = {}
+    for n = 1 to 8 do
+      local keyValue = keySource % 16
+      keyToken[#keyToken + 1] = b16:sub(keyValue, keyValue)
+    end
+    
+    b16 = nil
+    keySource = nil
+    math.randomseed(os.time())
+    
+    return {
+      userName = "root"
+      password = nil
+      realName = "Local Root"
+      userToken = table.concat(keyToken)
+    }
+  end
+  
+  function isUserAdmin()
+    return true
+  end
+}
+
+  -- ############## USER API FUNCTIONS ##############
+userApi = {
+
+  function getProcessInfo(processId)
+
+  end
+  
+  function startTimer(timeout)
+  
+  end
+  
+  function setAlarm(time)
+  
+  end
+  
+  function version()
+  
+  end
+  
+  function versionString()
+  
+  end
+  
+  function createProcess(fileName, environment, user)
+  
+  end
+  
+  function registerIPCHost(protocol)
+  
+  end
+  
+  function unregisterIPCHost(protocol)
+  
+  end
+  
+  function resolveIPCHost(protocol)
+  
+  end
+
+  function getProcessId()
+  
+  end
+  
+  function getPATH()
+  
+  end
+  
+  function pullEvent(filterString)
+  
+  end
+  
+  function pullEventRaw(filterString)
+  
+  end
+  
+  function sleep(sleepTime, allowWake)
+  
+  end
+  
+  function getWd()
+  
+  end
+  
+  function setWd(newWd)
+  
+  end
+  
+  function getPATH()
+  
+  end
+  
+  function setPATH(newPATH)
+  
+  end
+  
+  function getUser()
+  
+  end
+  
+  function getAuthUser()
+  
+  end
+  
+  function setAuthUser(user)
+  
+  end
+  
+  function getFile()
+  
+  end
+}
+
+-- ############## ADMIN API FUNCTIONS ##############
+adminApi = {
+
+  function killProcess(nProcessId)
+
+  end
+
+  function getProcessInfo(processId)
+
+  end
+
+  function broadcastRawEvent(eventData)
+
+  end
+
+  function assumeProcessId(processId)
+
+  end
+
+  function registerApi(apiName, sourceTable)
+
+  end
+
+  function sendRawEvent(processId, eventData)
+  
+  end
+  
+  function loadApiFile(sourceFile)
+
+  end
+
+  function getRootUser()
+  
+  end
+  
+  function getSystemLogWindow()
+  
+  end
+}
+
+kernel.userApi = userApi
+kernel.adminApi = adminApi
+
+return kernel
